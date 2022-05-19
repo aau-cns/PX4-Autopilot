@@ -187,7 +187,7 @@ bool Ekf::initialiseFilter()
 	}
 
 	// we use baro height initially and switch to GPS/range/EV finder later when it passes checks.
-	setControlBaroHeight();
+	_control_status.flags.baro_hgt = false;
 
 	if (!initialiseTilt()) {
 		return false;

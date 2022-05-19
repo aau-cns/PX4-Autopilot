@@ -864,29 +864,62 @@ void Ekf::checkVerticalAccelerationHealth()
 void Ekf::controlHeightFusion()
 {
 	checkRangeAidSuitability();
-	const bool do_range_aid = (_params.range_aid == 1) && _is_range_aid_suitable;
+	/* const bool do_range_aid = (_params.range_aid == 1) && _is_range_aid_suitable; */
+
+	updateGroundEffect();
 
 	switch (_params.vdist_sensor_type) {
 	default:
 		ECL_ERR("Invalid hgt mode: %" PRIi32, _params.vdist_sensor_type);
 
-	// FALLTHROUGH
+	/* FALLTHROUGH */
 	case VerticalHeightSensor::BARO:
-		if (do_range_aid) {
-			if (!_control_status.flags.rng_hgt && _range_sensor.isDataHealthy()) {
-				startRngAidHgtFusion();
+	/* FALLTHROUGH */
+	case VerticalHeightSensor::GPS:
+		// NOTE: emergency fallback due to extended loss of currently selected sensor data or failure
+		// to pass innovation cinsistency checks is handled elsewhere in Ekf::controlHeightSensorTimeouts.
+		if (_baro_data_ready) {
+			updateBaroHgt(_baro_sample_delayed, _aid_src_baro_hgt);
+
+			const bool continuing_conditions_passing = !_baro_hgt_faulty && !_baro_hgt_intermittent;
+			const bool starting_conditions_passing = continuing_conditions_passing;
+
+			if (_control_status.flags.baro_hgt) {
+				if (continuing_conditions_passing) {
+					fuseBaroHgt(_aid_src_baro_hgt);
+
+				} else {
+					stopBaroHgtFusion();
+				}
+			} else {
+				if (starting_conditions_passing) {
+					startBaroHgtFusion();
+				}
 			}
 
-		} else {
-			if (!_control_status.flags.baro_hgt) {
-				if (!_baro_hgt_faulty && !_baro_hgt_intermittent) {
-					startBaroHgtFusion();
+		} else if (_control_status.flags.baro_hgt && isTimedOut(_time_last_baro, _params.reset_timeout_max)) {
+			// No baro data anymore. Stop until it comes back.
+			stopBaroHgtFusion();
+		}
 
-				} else if (!_control_status.flags.gps_hgt && !_gps_intermittent && _gps_checks_passed) {
-					// Use GPS as a fallback
+		if (_gps_data_ready) {
+			const bool continuing_conditions_passing = !_gps_intermittent && _gps_checks_passed && _NED_origin_initialised;
+			const bool starting_conditions_passing = continuing_conditions_passing;
+
+			if (_control_status.flags.gps_hgt) {
+				if (continuing_conditions_passing) {
+					/* fuseGpsHgt(); */ // Done in fuseGpsPos
+
+				} else {
+					stopGpsHgtFusion();
+				}
+			} else {
+				if (starting_conditions_passing) {
 					startGpsHgtFusion();
 				}
 			}
+		} else {
+			// timeout handled in other GPS control logic
 		}
 
 		break;
@@ -912,32 +945,6 @@ void Ekf::controlHeightFusion()
 
 		break;
 
-	case VerticalHeightSensor::GPS:
-
-		// NOTE: emergency fallback due to extended loss of currently selected sensor data or failure
-		// to pass innovation cinsistency checks is handled elsewhere in Ekf::controlHeightSensorTimeouts.
-		// Do switching between GPS and rangefinder if using range finder as a height source when close
-		// to ground and moving slowly. Also handle switch back from emergency Baro sensor when GPS recovers.
-		if (do_range_aid) {
-			if (!_control_status_prev.flags.rng_hgt && _range_sensor.isDataHealthy()) {
-				startRngAidHgtFusion();
-			}
-
-		} else {
-			if (!_control_status.flags.gps_hgt) {
-				if (!_gps_intermittent && _gps_checks_passed) {
-					// In fallback mode and GPS has recovered so start using it
-					startGpsHgtFusion();
-
-				} else if (!_control_status.flags.baro_hgt && !_baro_hgt_faulty && !_baro_hgt_intermittent) {
-					// Use baro as a fallback
-					startBaroHgtFusion();
-				}
-			}
-		}
-
-		break;
-
 	case VerticalHeightSensor::EV:
 
 		// don't start using EV data unless data is arriving frequently
@@ -946,18 +953,6 @@ void Ekf::controlHeightFusion()
 		}
 
 		break;
-	}
-
-	updateBaroHgtBias();
-	updateBaroHgtOffset();
-	updateGroundEffect();
-
-	if (_baro_data_ready) {
-		updateBaroHgt(_baro_sample_delayed, _aid_src_baro_hgt);
-
-		if (_control_status.flags.baro_hgt && !_baro_hgt_faulty) {
-			fuseBaroHgt(_aid_src_baro_hgt);
-		}
 	}
 
 	if (_rng_data_ready) {
@@ -969,11 +964,12 @@ void Ekf::controlHeightFusion()
 	}
 
 	if (_control_status.flags.ev_hgt) {
-
 		if (_control_status.flags.ev_hgt && _ev_data_ready) {
 			fuseEvHgt();
 		}
 	}
+
+	updateBaroHgtBias(); // update the baro bias after fusing GPS and baro to avoid using the same data multiple times
 }
 
 void Ekf::checkRangeAidSuitability()
