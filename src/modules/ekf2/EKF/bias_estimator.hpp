@@ -67,6 +67,12 @@ public:
 	BiasEstimator() = default;
 	~BiasEstimator() = default;
 
+	void reset()
+	{
+		_state = 0.f;
+		_state_var = 0.1f;
+	}
+
 	void predict(float dt);
 	void fuseBias(float measurement, float measurement_var);
 

@@ -97,12 +97,11 @@ enum TerrainFusionMask : uint8_t {
 	TerrainFuseOpticalFlow = (1 << 1)
 };
 
-enum VerticalHeightSensor : uint8_t {
-	// Integer definitions for vdist_sensor_type
-	BARO  = 0,   	///< Use baro height
-	GPS   = 1,   	///< Use GPS height
-	RANGE = 2,   	///< Use range finder height
-	EV    = 3    	///< Use external vision
+enum HeightSensorRef : uint8_t {
+	BARO  = 0,
+	GPS   = 1,
+	RANGE = 2,
+	EV    = 3
 };
 
 enum SensorFusionMask : uint16_t {
@@ -115,7 +114,11 @@ enum SensorFusionMask : uint16_t {
 	USE_DRAG         = (1<<5),      ///< set to true to use the multi-rotor drag model to estimate wind
 	ROTATE_EXT_VIS   = (1<<6),      ///< set to true to if the EV observations are in a non NED reference frame and need to be rotated before being used
 	USE_GPS_YAW      = (1<<7),      ///< set to true to use GPS yaw data if available
-	USE_EXT_VIS_VEL  = (1<<8)       ///< set to true to use external vision velocity data
+	USE_EXT_VIS_VEL  = (1<<8),      ///< set to true to use external vision velocity data
+	USE_BARO_HGT     = (1<<9),      ///< set to true to use baro data
+	USE_GPS_HGT      = (1<<10),     ///< set to true to use GPS height data
+	USE_RNG_HGT      = (1<<11),     ///< set to true to use range height data
+	USE_EXT_VIS_HGT  = (1<<12)     ///< set to true to use external vision height data
 };
 
 struct gpsMessage {
@@ -239,8 +242,9 @@ struct parameters {
 	int32_t filter_update_interval_us{10000}; ///< filter update interval in microseconds
 
 	// measurement source control
-	int32_t fusion_mode{SensorFusionMask::USE_GPS};         ///< bitmasked integer that selects which aiding sources will be used
-	int32_t vdist_sensor_type{VerticalHeightSensor::BARO};  ///< selects the primary source for height data
+	int32_t fusion_mode{SensorFusionMask::USE_GPS |
+			    SensorFusionMask::USE_BARO_HGT};         ///< bitmasked integer that selects which aiding sources will be used
+	int32_t height_sensor_ref{HeightSensorRef::GPS};
 	int32_t terrain_fusion_mode{TerrainFusionMask::TerrainFuseRangeFinder |
 				    TerrainFusionMask::TerrainFuseOpticalFlow}; ///< aiding source(s) selection bitmask for the terrain estimator
 

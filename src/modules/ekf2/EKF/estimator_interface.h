@@ -43,7 +43,7 @@
 #define EKF_ESTIMATOR_INTERFACE_H
 
 #if defined(MODULE_NAME)
-# define ECL_INFO PX4_DEBUG
+# define ECL_INFO PX4_INFO
 # define ECL_WARN PX4_DEBUG
 # define ECL_ERR  PX4_DEBUG
 # define ECL_DEBUG PX4_DEBUG

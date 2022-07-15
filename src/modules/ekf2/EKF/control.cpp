@@ -652,64 +652,12 @@ void Ekf::controlHeightSensorTimeouts()
 
 	checkVerticalAccelerationHealth();
 
-	// check if height is continuously failing because of accel errors
-	const bool continuous_bad_accel_hgt = isTimedOut(_time_good_vert_accel, (uint64_t)_params.bad_acc_reset_delay_us);
-
-	// check if height has been inertial deadreckoning for too long
-	// in vision hgt mode check for vision data
-	const bool hgt_fusion_timeout = isTimedOut(_time_last_hgt_fuse, (uint64_t)5e6);
-
-	if (hgt_fusion_timeout || continuous_bad_accel_hgt) {
+	if (isHeightResetRequired()) {
 
 		const char *failing_height_source = nullptr;
 		const char *new_height_source = nullptr;
 
-		if (_control_status.flags.baro_hgt) {
-			bool reset_to_gps = false;
-
-			// reset to GPS if adequate GPS data is available and the timeout cannot be blamed on IMU data
-			if (!_gps_intermittent) {
-				reset_to_gps = (_gps_checks_passed && !_fault_status.flags.bad_acc_vertical) || _baro_hgt_faulty || _baro_hgt_intermittent;
-			}
-
-			if (reset_to_gps) {
-				// set height sensor health
-				_baro_hgt_faulty = true;
-
-				startGpsHgtFusion();
-
-				failing_height_source = "baro";
-				new_height_source = "gps";
-
-			} else if (!_baro_hgt_faulty && !_baro_hgt_intermittent) {
-				resetHeightToBaro();
-
-				failing_height_source = "baro";
-				new_height_source = "baro";
-			}
-
-		} else if (_control_status.flags.gps_hgt) {
-			bool reset_to_baro = false;
-
-			// if baro data is available and GPS data is inaccurate and the timeout cannot be blamed on IMU data, reset height to baro
-			if (!_baro_hgt_faulty && !_baro_hgt_intermittent) {
-				reset_to_baro = (!_fault_status.flags.bad_acc_vertical && !_gps_checks_passed) || _gps_intermittent;
-			}
-
-			if (reset_to_baro) {
-				startBaroHgtFusion();
-
-				failing_height_source = "gps";
-				new_height_source = "baro";
-
-			} else if (!_gps_intermittent) {
-				resetHeightToGps();
-
-				failing_height_source = "gps";
-				new_height_source = "gps";
-			}
-
-		} else if (_control_status.flags.rng_hgt) {
+		if (_control_status.flags.rng_hgt) {
 
 			if (_range_sensor.isHealthy()) {
 				resetHeightToRng();
@@ -759,13 +707,13 @@ void Ekf::controlHeightSensorTimeouts()
 			ECL_WARN("%s hgt timeout - reset to %s", failing_height_source, new_height_source);
 		}
 
-		// Also reset the vertical velocity
-		if (_control_status.flags.gps && !_gps_intermittent && _gps_checks_passed) {
-			resetVerticalVelocityToGps(_gps_sample_delayed);
+		/* // Also reset the vertical velocity */
+		/* if (_control_status.flags.gps && !_gps_intermittent && _gps_checks_passed) { */
+		/* 	resetVerticalVelocityToGps(_gps_sample_delayed); */
 
-		} else {
-			resetVerticalVelocityToZero();
-		}
+		/* } else { */
+		/* 	resetVerticalVelocityToZero(); */
+		/* } */
 	}
 }
 
@@ -778,6 +726,7 @@ void Ekf::checkVerticalAccelerationHealth()
 	// Don't use stale innovation data.
 	bool is_inertial_nav_falling = false;
 	bool are_vertical_pos_and_vel_independant = false;
+	bool is_using_multiple_hgt_sources = false;
 
 	if (_control_status.flags.gps) {
 		// GNSS velocity
@@ -808,6 +757,8 @@ void Ekf::checkVerticalAccelerationHealth()
 	}
 
 	if (isRecent(_vert_pos_fuse_attempt_time_us, 1000000)) {
+		is_using_multiple_hgt_sources = _control_status.flags.gps_hgt && _control_status.flags.baro_hgt;
+
 		if (isRecent(_vert_vel_fuse_time_us, 1000000)) {
 			// If vertical position and velocity come from independent sensors then we can
 			// trust them more if they disagree with the IMU, but need to check that they agree
@@ -842,7 +793,7 @@ void Ekf::checkVerticalAccelerationHealth()
 
 	// if vertical velocity and position are independent and agree, then do not require evidence of clipping if
 	// innovations are large
-	const bool bad_vert_accel = (are_vertical_pos_and_vel_independant || is_clipping_frequently) && is_inertial_nav_falling;
+	const bool bad_vert_accel = (are_vertical_pos_and_vel_independant || is_using_multiple_hgt_sources || is_clipping_frequently) && is_inertial_nav_falling;
 
 	if (bad_vert_accel) {
 		_time_bad_vert_accel = _time_last_imu;
@@ -864,112 +815,19 @@ void Ekf::checkVerticalAccelerationHealth()
 void Ekf::controlHeightFusion()
 {
 	checkRangeAidSuitability();
-	/* const bool do_range_aid = (_params.range_aid == 1) && _is_range_aid_suitable; */
 
 	updateGroundEffect();
 
-	switch (_params.vdist_sensor_type) {
-	default:
-		ECL_ERR("Invalid hgt mode: %" PRIi32, _params.vdist_sensor_type);
+	controlBaroHeightFusion();
+	controlGpsHeightFusion();
+	controlRangeHeightFusion();
+	controlEvHeightFusion();
 
-	/* FALLTHROUGH */
-	case VerticalHeightSensor::BARO:
-	/* FALLTHROUGH */
-	case VerticalHeightSensor::GPS:
-		// NOTE: emergency fallback due to extended loss of currently selected sensor data or failure
-		// to pass innovation cinsistency checks is handled elsewhere in Ekf::controlHeightSensorTimeouts.
-		if (_baro_data_ready) {
-			updateBaroHgt(_baro_sample_delayed, _aid_src_baro_hgt);
-
-			const bool continuing_conditions_passing = !_baro_hgt_faulty && !_baro_hgt_intermittent;
-			const bool starting_conditions_passing = continuing_conditions_passing;
-
-			if (_control_status.flags.baro_hgt) {
-				if (continuing_conditions_passing) {
-					fuseBaroHgt(_aid_src_baro_hgt);
-
-				} else {
-					stopBaroHgtFusion();
-				}
-			} else {
-				if (starting_conditions_passing) {
-					startBaroHgtFusion();
-				}
-			}
-
-		} else if (_control_status.flags.baro_hgt && isTimedOut(_time_last_baro, _params.reset_timeout_max)) {
-			// No baro data anymore. Stop until it comes back.
-			stopBaroHgtFusion();
-		}
-
-		if (_gps_data_ready) {
-			const bool continuing_conditions_passing = !_gps_intermittent && _gps_checks_passed && _NED_origin_initialised;
-			const bool starting_conditions_passing = continuing_conditions_passing;
-
-			if (_control_status.flags.gps_hgt) {
-				if (continuing_conditions_passing) {
-					/* fuseGpsHgt(); */ // Done in fuseGpsPos
-
-				} else {
-					stopGpsHgtFusion();
-				}
-			} else {
-				if (starting_conditions_passing) {
-					startGpsHgtFusion();
-				}
-			}
-		} else {
-			// timeout handled in other GPS control logic
-		}
-
-		break;
-
-	case VerticalHeightSensor::RANGE:
-
-		// If we are supposed to be using range finder data as the primary height sensor, have bad range measurements
-		// and are on the ground, then synthesise a measurement at the expected on ground value
-		if (!_control_status.flags.in_air
-		    && !_range_sensor.isDataHealthy()
-		    && _range_sensor.isRegularlySendingData()
-		    && _range_sensor.isDataReady()) {
-
-			_range_sensor.setRange(_params.rng_gnd_clearance);
-			_range_sensor.setValidity(true); // bypass the checks
-		}
-
-		if (!_control_status.flags.rng_hgt) {
-			if (_range_sensor.isDataHealthy()) {
-				startRngHgtFusion();
-			}
-		}
-
-		break;
-
-	case VerticalHeightSensor::EV:
-
-		// don't start using EV data unless data is arriving frequently
-		if (!_control_status.flags.ev_hgt && isRecent(_time_last_ext_vision, 2 * EV_MAX_INTERVAL)) {
-			startEvHgtFusion();
-		}
-
-		break;
-	}
-
-	if (_rng_data_ready) {
-		updateRngHgt(_aid_src_rng_hgt);
-
-		if (_control_status.flags.rng_hgt && _range_sensor.isDataHealthy()) {
-			fuseRngHgt(_aid_src_rng_hgt);
-		}
-	}
-
-	if (_control_status.flags.ev_hgt) {
-		if (_control_status.flags.ev_hgt && _ev_data_ready) {
-			fuseEvHgt();
-		}
-	}
-
+	updateHeightSensorRef();
 	updateBaroHgtBias(); // update the baro bias after fusing GPS and baro to avoid using the same data multiple times
+	updateGpsHgtBias();
+	updateRngHgtBias();
+	updateEvHgtBias();
 }
 
 void Ekf::checkRangeAidSuitability()
@@ -998,6 +856,186 @@ void Ekf::checkRangeAidSuitability()
 
 	} else {
 		_is_range_aid_suitable = false;
+	}
+}
+
+void Ekf::controlBaroHeightFusion()
+{
+	if (!(_params.fusion_mode & SensorFusionMask::USE_BARO_HGT)) {
+		stopBaroHgtFusion();
+		return;
+	}
+
+	if (_baro_data_ready) {
+		updateBaroHgt(_baro_sample_delayed, _aid_src_baro_hgt);
+
+		const bool continuing_conditions_passing = !_baro_hgt_faulty && !_baro_hgt_intermittent;
+		const bool starting_conditions_passing = continuing_conditions_passing;
+
+		if (_control_status.flags.baro_hgt) {
+			if (continuing_conditions_passing) {
+				fuseBaroHgt(_aid_src_baro_hgt);
+
+				const bool is_fusion_failing = isTimedOut(_aid_src_baro_hgt.time_last_fuse, (uint64_t)5e6);
+
+				if (isHeightResetRequired()) {
+					// All height sources are failing
+					resetHeightToBaro();
+					resetVerticalVelocityToZero();
+
+				} else if (is_fusion_failing) {
+					if (_aid_src_gnss_pos.fusion_enabled[2] && !_aid_src_gnss_pos.innovation_rejected[2]) {
+						// GPS can take-over
+						stopBaroHgtFusion();
+						_baro_hgt_faulty = true;
+
+					} else {
+						// No one else can take-over
+						resetHeightToBaro();
+						resetVerticalVelocityToZero();
+					}
+				}
+
+			} else {
+				stopBaroHgtFusion();
+			}
+		} else {
+			if (starting_conditions_passing) {
+				startBaroHgtFusion();
+			}
+		}
+
+	} else if (_control_status.flags.baro_hgt && _baro_hgt_intermittent) {
+		// No baro data anymore. Stop until it comes back.
+		stopBaroHgtFusion();
+	}
+}
+
+void Ekf::controlGpsHeightFusion()
+{
+	if (!(_params.fusion_mode & SensorFusionMask::USE_GPS_HGT)) {
+		stopGpsHgtFusion();
+		return;
+	}
+
+	if (_gps_data_ready) {
+		const bool continuing_conditions_passing = !_gps_intermittent && _gps_checks_passed && _NED_origin_initialised;
+		const bool starting_conditions_passing = continuing_conditions_passing;
+
+		if (_control_status.flags.gps_hgt) {
+			if (continuing_conditions_passing) {
+				/* fuseGpsHgt(); */ // Done in fuseGpsPos
+
+				const bool is_fusion_failing = isTimedOut(_aid_src_gnss_pos.time_last_fuse[2], _params.reset_timeout_max);
+
+				if (isHeightResetRequired()) {
+					// All height sources are failing
+					resetHeightToGps();
+					resetVerticalVelocityToGps(_gps_sample_delayed);
+
+				} else if (is_fusion_failing) {
+					if (_aid_src_baro_hgt.fusion_enabled && !_aid_src_baro_hgt.innovation_rejected) {
+						// Baro can take-over
+						stopGpsHgtFusion();
+
+					} else {
+						// No one else can take-over
+						resetHeightToGps();
+						resetVerticalVelocityToGps(_gps_sample_delayed);
+					}
+				}
+
+			} else {
+				stopGpsHgtFusion();
+			}
+		} else {
+			if (starting_conditions_passing) {
+				startGpsHgtFusion();
+			}
+		}
+
+	} else if (_control_status.flags.gps_hgt && _gps_intermittent) {
+		stopGpsHgtFusion();
+	}
+}
+
+void Ekf::controlRangeHeightFusion()
+{
+	if (!(_params.fusion_mode & SensorFusionMask::USE_RNG_HGT)) {
+		stopRngHgtFusion();
+		return;
+	}
+
+	// If we are supposed to be using range finder data as the primary height sensor, have bad range measurements
+	// and are on the ground, then synthesise a measurement at the expected on ground value
+	if (!_control_status.flags.in_air
+	    && !_range_sensor.isDataHealthy()
+	    && _range_sensor.isRegularlySendingData()
+	    && _range_sensor.isDataReady()) {
+
+		_range_sensor.setRange(_params.rng_gnd_clearance);
+		_range_sensor.setValidity(true); // bypass the checks
+	}
+
+	if (_rng_data_ready) {
+
+		// TODO: primary height source:
+		// run a bias estimator for all other sources
+		updateRngHgt(_aid_src_rng_hgt);
+
+		const bool continuing_conditions_passing = _range_sensor.isDataHealthy();
+		const bool starting_conditions_passing = continuing_conditions_passing
+							 && _range_sensor.isRegularlySendingData();
+
+		if (_control_status.flags.rng_hgt) {
+			if (continuing_conditions_passing) {
+				fuseRngHgt(_aid_src_rng_hgt);
+				//TODO: fusion timeout
+
+			} else {
+				stopRngHgtFusion();
+			}
+
+		} else {
+			if (starting_conditions_passing) {
+				startRngHgtFusion();
+			}
+		}
+
+	} else if (_control_status.flags.rng_hgt && isTimedOut(_time_last_range, (uint64_t)5e6)) {
+		stopRngHgtFusion();
+	}
+}
+
+void Ekf::controlEvHeightFusion()
+{
+	if (!(_params.fusion_mode & SensorFusionMask::USE_EXT_VIS_HGT)) {
+		stopEvHgtFusion();
+		return;
+	}
+
+	if (_ev_data_ready) {
+		const bool continuing_conditions_passing = true;
+		const bool starting_conditions_passing = continuing_conditions_passing
+							 && isRecent(_time_last_ext_vision, 2 * EV_MAX_INTERVAL);
+
+		if (_control_status.flags.ev_hgt) {
+			if (continuing_conditions_passing) {
+				fuseEvHgt();
+
+				//TODO: fusion timeout
+			} else {
+				stopEvHgtFusion();
+			}
+
+		} else {
+			if (starting_conditions_passing) {
+				startEvHgtFusion();
+			}
+		}
+
+	} else if (_control_status.flags.ev_hgt && isTimedOut(_time_last_ext_vision, (uint64_t)5e6)) {
+		stopEvHgtFusion();
 	}
 }
 
